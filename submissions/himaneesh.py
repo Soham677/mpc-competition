@@ -9,28 +9,28 @@ import numpy as np
 # --- CONFIGURATION ---
 MPC_CONFIG = {
     "dt": 0.1,
-    "horizon": 22,
-    "near_goal_distance": 1.0,
+    "horizon": 35,
+    "near_goal_distance": 1.5,
 }
 
 # Expanded grid for better precision
 CONTROL_GRID = {
     "slow_speeds": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-    "cruise_speeds": [0.5, 0.8, 1.1, 1.4, 1.7, 2.0, 2.3, 2.6, 2.9, 3.2],
-    "turn_rates": [-1.5, -1.2, -0.9, -0.6, -0.3, 0.0, 0.3, 0.6, 0.9, 1.2, 1.5],
+    "cruise_speeds": [0.5, 0.8, 1.1, 1.4, 1.7, 2.0, 2.3, 2.6, 2.9, 3.2, 3.5, 4.0, 4.5],
+    "turn_rates": [-1.5, -1.2, -0.9, -0.6, -0.3, 0.0, 0.3, 0.6, 0.9, 1.2, 1.5, 1.8, 2.0],
 }
 
 # Tuned for "Time to Goal" (minimized travel time)
 WEIGHTS = {
-    "goal_position": 1.6,
-    "goal_heading": 0.08,
-    "turn_rate": 0.05,
+    "goal_position": 0.8,
+    "goal_heading": 0.05,
+    "turn_rate": 0.01,
     "terminal_goal": 36.0,
     "collision": 8000.0,
     "collision_depth": 1600.0,
-    "near_obstacle": 18.0,
-    "far_obstacle": 0.8,
-    "stopping": 20.0,
+    "near_obstacle": 25.0,
+    "far_obstacle": 1.2,
+    "stopping": 2.0,
 }
 
 SAFETY = {
@@ -53,9 +53,6 @@ class Agent:
         best_control = np.array([0.0, 0.0], dtype=float)
         best_cost = float("inf")
 
-        # This is the receding horizon loop. Each candidate is held constant in
-        # the prediction, but only the first control is used by the simulator.
-        # The next call to act() repeats the search from the new state.
         for candidate_control in candidate_controls(state, goal, control_limits):
             rollout_cost = evaluate_rollout(
                 state,
@@ -115,8 +112,6 @@ def evaluate_rollout(
     total_cost = 0.0
 
     for step_index in range(1, int(MPC_CONFIG["horizon"]) + 1):
-        # Rate limits matter in this problem, so the predicted control is
-        # ramped exactly like the simulator will ramp it.
         predicted_control = apply_control_limits(
             requested_control, predicted_control, control_limits
         )
@@ -128,11 +123,15 @@ def evaluate_rollout(
         total_cost += WEIGHTS["goal_heading"] * heading_error
         total_cost += WEIGHTS["turn_rate"] * abs(predicted_control[1])
 
+        # Obstacle Collision Check and Braking
         for obstacle in active_obstacles:
             predicted_obstacle = predict_obstacle(obstacle, step_index * float(MPC_CONFIG["dt"]))
             clearance = rectangle_clearance(
                 predicted_state, predicted_obstacle, robot_radius
             )
+            if clearance < 0.3 * robot_radius:  # Proactive Braking
+                total_cost += 500.0  # Add a penalty for near collision
+
             total_cost += collision_cost(clearance)
 
     terminal_distance = float(np.linalg.norm(goal[:2] - predicted_state[:2]))
@@ -144,7 +143,6 @@ def evaluate_rollout(
 
 
 def get_active_obstacles(observation: dict[str, Any]) -> list[dict[str, float]]:
-    """Return the nearest obstacles selected by the simulator."""
     active_indices = set(observation["active_obstacle_indices"])
     return [
         obstacle
@@ -154,7 +152,6 @@ def get_active_obstacles(observation: dict[str, Any]) -> list[dict[str, float]]:
 
 
 def collision_cost(clearance: float) -> float:
-    """Convert robot-obstacle clearance into a soft penalty."""
     if clearance < 0.0:
         return WEIGHTS["collision"] + WEIGHTS["collision_depth"] * abs(clearance)
     if clearance < SAFETY["near_obstacle_distance"]:
@@ -202,7 +199,6 @@ def apply_control_limits(
 
 
 def step_unicycle(state: np.ndarray, control: np.ndarray) -> np.ndarray:
-    """Advance [x, y, theta] using the unicycle model."""
     time_step = float(MPC_CONFIG["dt"])
     return np.array(
         [
@@ -212,6 +208,7 @@ def step_unicycle(state: np.ndarray, control: np.ndarray) -> np.ndarray:
         ],
         dtype=float,
     )
+
 
 def predict_obstacle(
     obstacle: dict[str, float], prediction_time: float
@@ -230,12 +227,10 @@ def predict_obstacle(
         ),
     }
 
+
 def rectangle_clearance(
     state: np.ndarray, obstacle: dict[str, float], robot_radius: float
 ) -> float:
-    # Work in the obstacle frame so a rotated rectangle can be checked like a
-    # plain rectangle. The signed distance formula then gives positive
-    # clearance outside the rectangle and negative clearance inside it.
     translated_x = state[0] - obstacle["cx"]
     translated_y = state[1] - obstacle["cy"]
     cos_angle = math.cos(-obstacle["angle"])
